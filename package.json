@@ -1,7 +1,7 @@
 {
-  "name": "node-resemble-js",
-  "version": "1.2.0",
-  "description": "Image analysis and comparison for nodejs",
+  "name": "klassijs-resemblejs",
+  "version": "2.0.0",
+  "description": "Image analysis and comparison for nodeJS",
   "main": "resemble.js",
   "scripts": {
     "test": "gulp test"
@@ -11,7 +11,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/klassijs/node-resemble.js.git"
+    "url": "https://github.com/klassijs/klassijs-resemblejs.git"
   },
   "keywords": [
     "comparison",
@@ -19,12 +19,11 @@
     "diff",
     "compare"
   ],
-  "author": "Lukas Svoboda <lukas.svoboda@gmail.com>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/klassijs/node-resemble.js/issues"
+    "url": "https://github.com/klassijs/klassijs-resemblejs/issues"
   },
-  "homepage": "https://github.com/klassijs/node-resemble.js",
+  "homepage": "https://github.com/klassijs/klassijs-resemblejs",
   "dependencies": {
     "jpeg-js": "^0.4.4",
     "pngjs": "^7.0.0"
