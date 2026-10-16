@@ -27,21 +27,28 @@ var api = resemble(fileData).onComplete(function(data){
 });
 ```
 
-Use resemble to compare two images.
+Use resemble to compare two images. The default `tolerance` is `16` (a YIQ distance). That ignores one-level export noise and still fails a real colour change. Pass a smaller number, such as `0.1`, for a stricter compare.
 
 ```javascript
-var diff = resemble(file).compareTo(file2).ignoreColors().onComplete(function(data){
+var diff = resemble(file).compareTo(file2).tolerance(16).ignoreAntialiasing().onComplete(function(data){
 	console.log(data);
 	/*
 	{
 	  misMatchPercentage : 100, // %
+	  rawMisMatchPercentage : 100,
 	  isSameDimensions: true, // or false
-	  dimensionDifference: { width: 0, height: -1 }, // defined if dimensions are not the same
-	  getImageDataUrl: function(){}
+	  dimensionDifference: { width: 0, height: -1 }, // width/height of the first image minus the second
+	  diffBounds: { top: 0, left: 0, bottom: 0, right: 0 },
+	  analysisStoppedEarly: false,
+	  getDiffImage: function(){}
 	}
 	*/
 });
 ```
+
+Images of different sizes are compared on their overlap. Pixels that exist in only one image count as a mismatch, and the percentage is based on the area of the larger image.
+
+`returnEarlyThreshold(percent)` stops the scan once the running mismatch is already above that percentage. `rawMisMatchPercentage` is then the value so far, and `analysisStoppedEarly` is `true`. `diffBounds` is the inclusive box of the mismatch pixels found, including the extra strip when the sizes differ.
 
 You can also change the comparison method after the first analysis.
 
@@ -72,13 +79,15 @@ resemble.outputSettings({
 
      this.Then(/^Screenshot should match image "(.*)"$/, function (image, callback) {
         browser.takeScreenshot().then(function(pngString) {
-          var screenshot = new Buffer(pngString, 'base64');
-     
+          var screenshot = Buffer.from(pngString, 'base64');
+
           resemble(image)
             .compareTo(screenshot)
+            .tolerance(16)
+            .ignoreAntialiasing()
             .onComplete(function(data){
-     
-              if (Number(data.misMatchPercentage) <= 0.01) {
+
+              if (data.rawMisMatchPercentage <= 0.01) {
                 callback();
               } else {
                 data.getDiffImage().pack().pipe(fs.createWriteStream(image + 'diff.png'));

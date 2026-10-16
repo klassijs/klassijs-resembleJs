@@ -1,601 +1,800 @@
-/*
-James Cryer / Huddle 2014
-URL: https://github.com/Huddle/Resemble.js
-*/
 'use strict';
 
-const PNG = require('pngjs').PNG;
 const fs = require('fs');
+const { PNG } = require('pngjs');
 const jpeg = require('jpeg-js');
 
-//keeping wrong indentation and '_this' for better diff with origin resemble.js
-let _this = {};
+// YIQ distance limit. 16 ignores one-level export noise and shifts below
+// about eight levels of green, and still fails a real colour change.
+const DEFAULT_TOLERANCE = 16;
+// Smallest YIQ distance per unit of dr^2+dg^2+db^2. A larger RGB step cannot
+// fall inside `tolerance`, so the loop can reject it without the full formula.
+const MIN_YIQ_PER_MAG = 0.044;
 
-	let pixelTransparency = 1;
+const defaults = {
+	errorColor: { red: 255, green: 0, blue: 255, alpha: 255 },
+	errorType: 'flat',
+	transparency: 1
+};
 
-	let errorPixelColor = { // Color for Error Pixels. Between 0 and 255.
-		red: 255,
-		green: 0,
-		blue: 255,
-		alpha: 255
-	};
-
-	let errorPixelTransform = {
-		flat : function (d1, d2){
-			return {
-				r: errorPixelColor.red,
-				g: errorPixelColor.green,
-				b: errorPixelColor.blue,
-				a: errorPixelColor.alpha
-			}
+function cloneSettings() {
+	return {
+		errorColor: {
+			red: defaults.errorColor.red,
+			green: defaults.errorColor.green,
+			blue: defaults.errorColor.blue,
+			alpha: defaults.errorColor.alpha
 		},
-		movement: function (d1, d2){
-			return {
-				r: ((d2.r*(errorPixelColor.red/255)) + errorPixelColor.red)/2,
-				g: ((d2.g*(errorPixelColor.green/255)) + errorPixelColor.green)/2,
-				b: ((d2.b*(errorPixelColor.blue/255)) + errorPixelColor.blue)/2,
-				a: d2.a
-			}
-		}
+		errorType: defaults.errorType,
+		transparency: defaults.transparency
 	};
+}
 
-	let errorPixelTransformer = errorPixelTransform.flat;
-	let largeImageThreshold = 1200;
+function resemble(fileData) {
+	const settings = cloneSettings();
+	const data = {};
+	const updateCallbackArray = [];
 
-	_this['resemble'] = function( fileData ){
+	let tolerance = DEFAULT_TOLERANCE;
+	let ignoreAntialiasing = false;
+	let ignoreColors = false;
+	let ignoreRectangles = null;
+	let earlyThreshold = null;
 
-		let data = {};
-		let images = [];
-		let updateCallbackArray = [];
-
-		let tolerance = { // between 0 and 255
-			red: 16,
-			green: 16,
-			blue: 16,
-			alpha: 16,
-			minBrightness: 16,
-			maxBrightness: 240
-		};
-
-		let ignoreAntialiasing = false;
-		let ignoreColors = false;
-    let ignoreRectangles = null;
-
-		function triggerDataUpdate(){
-			let len = updateCallbackArray.length;
-			let i;
-			for(i=0;i<len;i++){
-				if (typeof updateCallbackArray[i] === 'function'){
-					updateCallbackArray[i](data);
-				}
+	function triggerDataUpdate() {
+		for (let i = 0; i < updateCallbackArray.length; i++) {
+			if (typeof updateCallbackArray[i] === 'function') {
+				updateCallbackArray[i](data);
 			}
 		}
+	}
 
-		function loop(x, y, callback){
-			let i,j;
-
-			for (i=0;i<x;i++){
-				for (j=0;j<y;j++){
-					callback(i, j);
-				}
+	function onComplete(callback) {
+		updateCallbackArray.push(callback);
+		loadImage(fileData, (err, image) => {
+			if (err) {
+				data.error = err;
+				triggerDataUpdate();
+				return;
 			}
-		}
-
-		function parseImage(sourceImageData, width, height){
-
-			let pixleCount = 0;
-			let redTotal = 0;
-			let greenTotal = 0;
-			let blueTotal = 0;
-			let brightnessTotal = 0;
-
-			loop(height, width, function(verticalPos, horizontalPos){
-				let offset = (verticalPos*width + horizontalPos) * 4;
-				let red = sourceImageData[offset];
-				let green = sourceImageData[offset + 1];
-				let blue = sourceImageData[offset + 2];
-				let brightness = getBrightness(red,green,blue);
-
-				pixleCount++;
-
-				redTotal += red / 255 * 100;
-				greenTotal += green / 255 * 100;
-				blueTotal += blue / 255 * 100;
-				brightnessTotal += brightness / 255 * 100;
-			});
-
-			data.red = Math.floor(redTotal / pixleCount);
-			data.green = Math.floor(greenTotal / pixleCount);
-			data.blue = Math.floor(blueTotal / pixleCount);
-			data.brightness = Math.floor(brightnessTotal / pixleCount);
-
+			parseImageInto(data, image.data, image.width, image.height);
 			triggerDataUpdate();
-		}
-
-		function loadImageData( fileData, callback ){
-
-			if (Buffer.isBuffer(fileData)) {
-				let png = new PNG();
-				png.parse(fileData, function (err, data) {
-				  callback(data, data.width, data.height);
-				});
-			} else {
-				let ext = fileData.substring(fileData.lastIndexOf(".")+1);
-				if(ext=="png") {
-					let png = new PNG();
-					fs.createReadStream(fileData)
-					  .pipe(png)
-					  .on('parsed', function() {
-						callback(this, this.width, this.height);
-					  });
-				}
-				if(ext=="jpg" || ext=="jpeg") {
-					let jpegData = fs.readFileSync(fileData);
-					fileData = jpeg.decode(jpegData, true);
-					callback(fileData, fileData.width, fileData.height);
-				}
-			};
-		}
-
-		function isColorSimilar(a, b, color){
-
-			let absDiff = Math.abs(a - b);
-
-			if(typeof a === 'undefined'){
-				return false;
-			}
-			if(typeof b === 'undefined'){
-				return false;
-			}
-
-			if(a === b){
-				return true;
-			} else if ( absDiff < tolerance[color] ) {
-				return true;
-			} else {
-				return false;
-			}
-		}
-
-		function isNumber(n) {
-			return !isNaN(parseFloat(n));
-		}
-
-		function isPixelBrightnessSimilar(d1, d2){
-			let alpha = isColorSimilar(d1.a, d2.a, 'alpha');
-			let brightness = isColorSimilar(d1.brightness, d2.brightness, 'minBrightness');
-			return brightness && alpha;
-		}
-
-		function getBrightness(r,g,b){
-			return 0.3*r + 0.59*g + 0.11*b;
-		}
-
-		function isRGBSame(d1,d2){
-			let red = d1.r === d2.r;
-			let green = d1.g === d2.g;
-			let blue = d1.b === d2.b;
-			return red && green && blue;
-		}
-
-		function isRGBSimilar(d1, d2){
-			let red = isColorSimilar(d1.r,d2.r,'red');
-			let green = isColorSimilar(d1.g,d2.g,'green');
-			let blue = isColorSimilar(d1.b,d2.b,'blue');
-			let alpha = isColorSimilar(d1.a, d2.a, 'alpha');
-
-			return red && green && blue && alpha;
-		}
-
-		function isContrasting(d1, d2){
-			return Math.abs(d1.brightness - d2.brightness) > tolerance.maxBrightness;
-		}
-
-		function getHue(r,g,b){
-
-			r = r / 255;
-			g = g / 255;
-			b = b / 255;
-			let max = Math.max(r, g, b), min = Math.min(r, g, b);
-			let h;
-			let d;
-
-			if (max == min){
-				h = 0; // achromatic
-			} else{
-				d = max - min;
-				switch(max){
-					case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-					case g: h = (b - r) / d + 2; break;
-					case b: h = (r - g) / d + 4; break;
-				}
-				h /= 6;
-			}
-
-			return h;
-		}
-
-		function isAntialiased(sourcePix, data, cacheSet, verticalPos, horizontalPos, width){
-			let offset;
-			let targetPix;
-			let distance = 1;
-			let i;
-			let j;
-			let hasHighContrastSibling = 0;
-			let hasSiblingWithDifferentHue = 0;
-			let hasEquivilantSibling = 0;
-
-			addHueInfo(sourcePix);
-
-			for (i = distance*-1; i <= distance; i++){
-				for (j = distance*-1; j <= distance; j++){
-
-					if(i===0 && j===0){
-						// ignore source pixel
-					} else {
-
-						offset = ((verticalPos+j)*width + (horizontalPos+i)) * 4;
-						targetPix = getPixelInfo(data, offset, cacheSet);
-
-						if(targetPix === null){
-							continue;
-						}
-
-						addBrightnessInfo(targetPix);
-						addHueInfo(targetPix);
-
-						if( isContrasting(sourcePix, targetPix) ){
-							hasHighContrastSibling++;
-						}
-
-						if( isRGBSame(sourcePix,targetPix) ){
-							hasEquivilantSibling++;
-						}
-
-						if( Math.abs(targetPix.h - sourcePix.h) > 0.3 ){
-							hasSiblingWithDifferentHue++;
-						}
-
-						if( hasSiblingWithDifferentHue > 1 || hasHighContrastSibling > 1){
-							return true;
-						}
-					}
-				}
-			}
-
-			if(hasEquivilantSibling < 2){
-				return true;
-			}
-
-			return false;
-		}
-
-		function errorPixel(px, offset, data1, data2){
-			let data = errorPixelTransformer(data1, data2);
-			px[offset] = data.r;
-			px[offset + 1] = data.g;
-			px[offset + 2] = data.b;
-			px[offset + 3] = data.a;
-		}
-
-		function copyPixel(px, offset, data){
-			px[offset] = data.r; //r
-			px[offset + 1] = data.g; //g
-			px[offset + 2] = data.b; //b
-			px[offset + 3] = data.a * pixelTransparency; //a
-		}
-
-		function copyGrayScalePixel(px, offset, data){
-			px[offset] = data.brightness; //r
-			px[offset + 1] = data.brightness; //g
-			px[offset + 2] = data.brightness; //b
-			px[offset + 3] = data.a * pixelTransparency; //a
-		}
-
-		function getPixelInfo(data, offset, cacheSet){
-			let r;
-			let g;
-			let b;
-			let d;
-			let a;
-
-			r = data[offset];
-
-			if(typeof r !== 'undefined'){
-				g = data[offset+1];
-				b = data[offset+2];
-				a = data[offset+3];
-				d = {
-					r: r,
-					g: g,
-					b: b,
-					a: a
-				};
-
-				return d;
-			} else {
-				return null;
-			}
-		}
-
-		function addBrightnessInfo(data){
-			data.brightness = getBrightness(data.r,data.g,data.b); // 'corrected' lightness
-		}
-
-		function addHueInfo(data){
-			data.h = getHue(data.r,data.g,data.b);
-		}
-
-		function analyseImages(img1, img2, width, height){
-
-			let data1 = img1.data;
-			let data2 = img2.data;
-
-      //TODO
-      let imgd = new PNG({
-          width: img1.width,
-          height: img1.height,
-          deflateChunkSize: img1.deflateChunkSize,
-          deflateLevel: img1.deflateLevel,
-          deflateStrategy: img1.deflateStrategy,
-        });
-			let targetPix = imgd.data;
-
-			let mismatchCount = 0;
-
-			let time = Date.now();
-
-			let skip;
-
-      let currentRectangle = null;
-      let rectagnlesIdx = 0;
-
-			if(!!largeImageThreshold && ignoreAntialiasing && (width > largeImageThreshold || height > largeImageThreshold)){
-				skip = 6;
-			}
-
-			loop(height, width, function(verticalPos, horizontalPos){
-
-				let offset = (verticalPos*width + horizontalPos) * 4;
-
-				if(skip){ // only skip if the image isn't small
-					if(verticalPos % skip === 0 || horizontalPos % skip === 0){
-
-						copyPixel(targetPix, offset, {
-							r: 0,
-							b: 0,
-							g: 0,
-							a: 0
-						});
-
-						return;
-					}
-				}
-
-				let pixel1 = getPixelInfo(data1, offset, 1);
-				let pixel2 = getPixelInfo(data2, offset, 2);
-
-				if(pixel1 === null || pixel2 === null){
-					return;
-				}
-
-        if (ignoreRectangles) {
-          for(rectagnlesIdx = 0; rectagnlesIdx < ignoreRectangles.length; rectagnlesIdx++) {
-            currentRectangle = ignoreRectangles[rectagnlesIdx];
-            //console.log(currentRectangle, verticalPos, horizontalPos);
-            if (
-              (verticalPos >= currentRectangle[1]) &&
-              (verticalPos < currentRectangle[1] + currentRectangle[3]) &&
-              (horizontalPos >= currentRectangle[0]) &&
-              (horizontalPos < currentRectangle[0] + currentRectangle[2])
-            ) {
-						  copyGrayScalePixel(targetPix, offset, pixel2);
-					    //copyPixel(targetPix, offset, pixel1, pixel2);
-              return;
-            }
-          }
-        }
-
-				if (ignoreColors){
-
-					addBrightnessInfo(pixel1);
-					addBrightnessInfo(pixel2);
-
-					if( isPixelBrightnessSimilar(pixel1, pixel2) ){
-						copyGrayScalePixel(targetPix, offset, pixel2);
-					} else {
-						errorPixel(targetPix, offset, pixel1, pixel2);
-						mismatchCount++;
-					}
-					return;
-				}
-
-				if( isRGBSimilar(pixel1, pixel2) ){
-					copyPixel(targetPix, offset, pixel1);
-
-				} else if( ignoreAntialiasing && (
-						addBrightnessInfo(pixel1), // jit pixel info augmentation looks a little weird, sorry.
-						addBrightnessInfo(pixel2),
-						isAntialiased(pixel1, data1, 1, verticalPos, horizontalPos, width) ||
-						isAntialiased(pixel2, data2, 2, verticalPos, horizontalPos, width)
-					)){
-
-					if( isPixelBrightnessSimilar(pixel1, pixel2) ){
-						copyGrayScalePixel(targetPix, offset, pixel2);
-					} else {
-						errorPixel(targetPix, offset, pixel1, pixel2);
-						mismatchCount++;
-					}
-				} else {
-					errorPixel(targetPix, offset, pixel1, pixel2);
-					mismatchCount++;
-				}
-
-			});
-
-			data.rawMisMatchPercentage = (mismatchCount / (height*width) * 100);
-			data.misMatchPercentage = data.rawMisMatchPercentage.toFixed(2);
-			data.analysisTime = Date.now() - time;
-
-			data.getDiffImage = function(text){
-        return imgd;
-			};
-
-			data.getDiffImageAsJPEG = function(quality) {
-				return jpeg.encode({
-				  data: targetPix,
-				  width: img1.width,
-				  height: img1.height
-				}, quality !== undefined ? quality : 50).data;
-			};
-		}
-
-		function compare(one, two){
-
-			function onceWeHaveBoth(img){
-				let width;
-				let height;
-
-        images.push(img);
-				if(images.length === 2){
-					width = images[0].width > images[1].width ? images[0].width : images[1].width;
-					height = images[0].height > images[1].height ? images[0].height : images[1].height;
-
-					if( (images[0].width === images[1].width) && (images[0].height === images[1].height) ){
-						data.isSameDimensions = true;
-					} else {
-						data.isSameDimensions = false;
-					}
-
-					data.dimensionDifference = { width: images[0].width - images[1].width, height: images[0].height - images[1].height };
-
-          //lksv: normalization removed
-					analyseImages( images[0], images[1], width, height);
-
-					triggerDataUpdate();
-				}
-			}
-
-			images = [];
-			loadImageData(one, onceWeHaveBoth);
-			loadImageData(two, onceWeHaveBoth);
-		}
-
-		function getCompareApi(param){
-
-			let secondFileData,
-				hasMethod = typeof param === 'function';
-
-			if( !hasMethod ){
-				// assume it's file data
-				secondFileData = param;
-			}
-
-			let self = {
-				ignoreNothing: function(){
-
-					tolerance.red = 16;
-					tolerance.green = 16;
-					tolerance.blue = 16;
-					tolerance.alpha = 16;
-					tolerance.minBrightness = 16;
-					tolerance.maxBrightness = 240;
-
-					ignoreAntialiasing = false;
-					ignoreColors = false;
-
-					if(hasMethod) { param(); }
-					return self;
-				},
-				ignoreAntialiasing: function(){
-
-					tolerance.red = 32;
-					tolerance.green = 32;
-					tolerance.blue = 32;
-					tolerance.alpha = 32;
-					tolerance.minBrightness = 64;
-					tolerance.maxBrightness = 96;
-
-					ignoreAntialiasing = true;
-					ignoreColors = false;
-
-					if(hasMethod) { param(); }
-					return self;
-				},
-				ignoreColors: function(){
-
-					tolerance.alpha = 16;
-					tolerance.minBrightness = 16;
-					tolerance.maxBrightness = 240;
-
-					ignoreAntialiasing = false;
-					ignoreColors = true;
-
-					if(hasMethod) { param(); }
-					return self;
-				},
-        //array of rectangles, each rectangle is defined as (x, y, width. height)
-        //e.g. [[325, 170, 100, 40]]
-        ignoreRectangles: function(rectangles) {
-          ignoreRectangles = rectangles;
-          return self;
-        },
-				repaint: function(){
-					if(hasMethod) { param(); }
-					return self;
-				},
-				onComplete: function( callback ){
-
-					updateCallbackArray.push(callback);
-
-					let wrapper = function(){
-						compare(fileData, secondFileData);
-					};
-
-					wrapper();
-
-					return getCompareApi(wrapper);
-				}
-			};
-
-			return self;
-		}
-
-		return {
-			onComplete: function( callback ){
-				updateCallbackArray.push(callback);
-				loadImageData(fileData, function(imageData, width, height){
-					parseImage(imageData.data, width, height);
-				});
+		});
+	}
+
+	function compareTo(secondFileData) {
+		const self = {
+			ignoreNothing() {
+				tolerance = DEFAULT_TOLERANCE;
+				ignoreAntialiasing = false;
+				ignoreColors = false;
+				return self;
 			},
-			compareTo: function(secondFileData){
-				return getCompareApi(secondFileData);
+			ignoreAntialiasing() {
+				ignoreAntialiasing = true;
+				ignoreColors = false;
+				return self;
+			},
+			ignoreColors() {
+				ignoreColors = true;
+				ignoreAntialiasing = false;
+				return self;
+			},
+			ignoreRectangles(rectangles) {
+				ignoreRectangles = rectangles;
+				return self;
+			},
+			tolerance(value) {
+				if (typeof value === 'number' && isFinite(value) && value >= 0) {
+					tolerance = value;
+				}
+				return self;
+			},
+			returnEarlyThreshold(value) {
+				if (typeof value === 'number' && isFinite(value) && value >= 0) {
+					earlyThreshold = value;
+				}
+				return self;
+			},
+			repaint() {
+				return self;
+			},
+			onComplete(callback) {
+				updateCallbackArray.push(callback);
+				runCompare(fileData, secondFileData);
+				return self;
 			}
 		};
 
-	};
+		return self;
+	}
 
-	_this['resemble'].outputSettings = function(options){
-		let key;
-		let undefined;
+	function runCompare(first, second) {
+		const images = new Array(2);
+		let pending = 2;
+		let failed = false;
 
-		if(options.errorColor){
-			for (key in options.errorColor) {
-				errorPixelColor[key] = options.errorColor[key] === undefined ? errorPixelColor[key] : options.errorColor[key];
+		function finish(index, err, image) {
+			if (failed) {
+				return;
+			}
+			if (err) {
+				failed = true;
+				data.error = err;
+				triggerDataUpdate();
+				return;
+			}
+			images[index] = image;
+			pending -= 1;
+			if (pending === 0) {
+				try {
+					analyseImages(images[0], images[1], settings, {
+						tolerance,
+						ignoreAntialiasing,
+						ignoreColors,
+						ignoreRectangles,
+						earlyThreshold
+					}, data);
+				} catch (analyseErr) {
+					data.error = analyseErr;
+				}
+				triggerDataUpdate();
 			}
 		}
 
-		if(options.errorType && errorPixelTransform[options.errorType] ){
-			errorPixelTransformer = errorPixelTransform[options.errorType];
-		}
+		loadImage(first, (err, image) => finish(0, err, image));
+		loadImage(second, (err, image) => finish(1, err, image));
+	}
 
-		pixelTransparency = options.transparency || pixelTransparency;
-
-		if (options.largeImageThreshold !== undefined) {
-			largeImageThreshold = options.largeImageThreshold;
-		}
-
-		return this;
+	return {
+		onComplete,
+		compareTo
 	};
+}
 
-module.exports = _this['resemble']
+resemble.outputSettings = function outputSettings(options) {
+	const source = options || {};
+
+	if (source.errorColor) {
+		const color = source.errorColor;
+		if (color.red !== undefined) defaults.errorColor.red = color.red;
+		if (color.green !== undefined) defaults.errorColor.green = color.green;
+		if (color.blue !== undefined) defaults.errorColor.blue = color.blue;
+		if (color.alpha !== undefined) defaults.errorColor.alpha = color.alpha;
+	}
+
+	if (source.errorType === 'flat' || source.errorType === 'movement') {
+		defaults.errorType = source.errorType;
+	}
+
+	if (typeof source.transparency === 'number' && isFinite(source.transparency)) {
+		defaults.transparency = source.transparency;
+	}
+
+	return this;
+};
+
+function loadImage(fileData, callback) {
+	if (Buffer.isBuffer(fileData)) {
+		let image;
+		let error;
+		try {
+			image = decodeImage(fileData);
+		} catch (err) {
+			error = err;
+		}
+		process.nextTick(() => callback(error, image));
+		return;
+	}
+
+	if (typeof fileData !== 'string' || fileData.length === 0) {
+		process.nextTick(() => callback(new Error('Unsupported image input')));
+		return;
+	}
+
+	fs.readFile(fileData, (err, buffer) => {
+		if (err) {
+			callback(err);
+			return;
+		}
+		try {
+			callback(null, decodeImage(buffer));
+		} catch (decodeErr) {
+			callback(decodeErr);
+		}
+	});
+}
+
+function decodeImage(buffer) {
+	if (isPng(buffer)) {
+		const png = PNG.sync.read(buffer);
+		return { width: png.width, height: png.height, data: png.data };
+	}
+
+	if (isJpeg(buffer)) {
+		const decoded = jpeg.decode(buffer, {
+			useTArray: true,
+			formatAsRGBA: true,
+			maxResolutionInMP: 100,
+			maxMemoryUsageInMB: 512
+		});
+		return { width: decoded.width, height: decoded.height, data: decoded.data };
+	}
+
+	throw new Error('Unsupported image format');
+}
+
+function isPng(buffer) {
+	return buffer.length >= 8 &&
+		buffer[0] === 0x89 &&
+		buffer[1] === 0x50 &&
+		buffer[2] === 0x4E &&
+		buffer[3] === 0x47;
+}
+
+function isJpeg(buffer) {
+	return buffer.length >= 2 && buffer[0] === 0xFF && buffer[1] === 0xD8;
+}
+
+function parseImageInto(target, sourceImageData, width, height) {
+	const pixelCount = width * height;
+	if (!pixelCount) {
+		target.error = new Error('Image has no pixels');
+		return;
+	}
+
+	let redTotal = 0;
+	let greenTotal = 0;
+	let blueTotal = 0;
+	let brightnessTotal = 0;
+
+	for (let i = 0; i < width * height * 4; i += 4) {
+		const red = sourceImageData[i];
+		const green = sourceImageData[i + 1];
+		const blue = sourceImageData[i + 2];
+		redTotal += red / 255 * 100;
+		greenTotal += green / 255 * 100;
+		blueTotal += blue / 255 * 100;
+		brightnessTotal += (0.3 * red + 0.59 * green + 0.11 * blue) / 255 * 100;
+	}
+
+	target.red = Math.floor(redTotal / pixelCount);
+	target.green = Math.floor(greenTotal / pixelCount);
+	target.blue = Math.floor(blueTotal / pixelCount);
+	target.brightness = Math.floor(brightnessTotal / pixelCount);
+}
+
+function analyseImages(img1, img2, settings, options, data) {
+	const started = process.hrtime.bigint();
+	const width1 = img1.width | 0;
+	const height1 = img1.height | 0;
+	const width2 = img2.width | 0;
+	const height2 = img2.height | 0;
+	const overlapWidth = Math.min(width1, width2);
+	const overlapHeight = Math.min(height1, height2);
+	const unionWidth = Math.max(width1, width2);
+	const unionHeight = Math.max(height1, height2);
+	const maskInfo = buildMask(options.ignoreRectangles, overlapWidth, overlapHeight);
+	const masked = maskInfo ? maskInfo.masked : 0;
+	const totalPixels = unionWidth * unionHeight;
+	const counted = totalPixels - masked;
+	const nonOverlap = totalPixels - (overlapWidth * overlapHeight);
+
+	data.isSameDimensions = width1 === width2 && height1 === height2;
+	data.dimensionDifference = { width: width1 - width2, height: height1 - height2 };
+
+	const diffImage = new PNG({ width: unionWidth, height: unionHeight });
+	const target = diffImage.data;
+	const bounds = { top: Infinity, left: Infinity, bottom: -1, right: -1 };
+	let mismatchCount = 0;
+	let stopped = false;
+
+	const identical = width1 === width2 &&
+		height1 === height2 &&
+		!maskInfo &&
+		settings.transparency === 1 &&
+		sameBytes(img1.data, img2.data);
+
+	if (identical) {
+		target.set(img1.data.subarray(0, target.length));
+	} else if (nonOverlapExceeds(options.earlyThreshold, nonOverlap, counted)) {
+		stopped = true;
+	} else if (useFastLoop(options, settings, maskInfo)) {
+		mismatchCount = compareFast(
+			img1.data,
+			img2.data,
+			width1,
+			width2,
+			overlapWidth,
+			overlapHeight,
+			unionWidth,
+			target,
+			options.tolerance,
+			settings.errorColor,
+			bounds
+		);
+		stopped = mismatchCount.stopped;
+		mismatchCount = mismatchCount.count;
+	} else {
+		const general = compareGeneral(
+			img1,
+			img2,
+			overlapWidth,
+			overlapHeight,
+			unionWidth,
+			target,
+			settings,
+			options,
+			maskInfo,
+			bounds,
+			counted,
+			nonOverlap
+		);
+		mismatchCount = general.count;
+		stopped = general.stopped;
+	}
+
+	if (!identical) {
+		mismatchCount += paintMissing(target, unionWidth, unionHeight, overlapWidth, overlapHeight, settings.errorColor, bounds);
+	}
+
+	const raw = counted === 0 ? 0 : (mismatchCount / counted) * 100;
+	data.rawMisMatchPercentage = raw;
+	data.misMatchPercentage = raw.toFixed(2);
+	data.analysisStoppedEarly = stopped;
+	data.diffBounds = bounds.bottom < 0 ? { top: 0, left: 0, bottom: 0, right: 0 } : {
+		top: bounds.top,
+		left: bounds.left,
+		bottom: bounds.bottom,
+		right: bounds.right
+	};
+	data.analysisTime = Number(process.hrtime.bigint() - started) / 1e6;
+	data.getDiffImage = function getDiffImage() {
+		return diffImage;
+	};
+	data.getDiffImageAsJPEG = function getDiffImageAsJPEG(quality) {
+		return jpeg.encode({
+			data: target,
+			width: unionWidth,
+			height: unionHeight
+		}, quality !== undefined ? quality : 50).data;
+	};
+}
+
+function nonOverlapExceeds(earlyThreshold, nonOverlap, counted) {
+	if (earlyThreshold == null || counted === 0) {
+		return false;
+	}
+	return (nonOverlap / counted) * 100 > earlyThreshold;
+}
+
+function useFastLoop(options, settings, maskInfo) {
+	return !options.ignoreAntialiasing &&
+		!options.ignoreColors &&
+		!maskInfo &&
+		settings.transparency === 1 &&
+		settings.errorType === 'flat' &&
+		options.earlyThreshold == null;
+}
+
+function compareFast(data1, data2, width1, width2, overlapWidth, overlapHeight, unionWidth, target, tolerance, errorColor, bounds) {
+	const view1 = uint32View(data1);
+	const view2 = uint32View(data2);
+	const viewOut = uint32View(target);
+	let count = 0;
+
+	if (!view1 || !view2 || !viewOut) {
+		return compareFastBytes(data1, data2, width1, width2, overlapWidth, overlapHeight, unionWidth, target, tolerance, errorColor, bounds);
+	}
+
+	const errorWord = colorWord(errorColor);
+
+	for (let y = 0; y < overlapHeight; y++) {
+		let p1 = y * width1;
+		let p2 = y * width2;
+		let pOut = y * unionWidth;
+		for (let x = 0; x < overlapWidth; x++, p1++, p2++, pOut++) {
+			const word1 = view1[p1];
+			if (word1 === view2[p2]) {
+				viewOut[pOut] = word1;
+				continue;
+			}
+
+			const i1 = p1 << 2;
+			const i2 = p2 << 2;
+			if (!rgbaDiffers(data1, i1, data2, i2, tolerance)) {
+				viewOut[pOut] = word1;
+				continue;
+			}
+
+			viewOut[pOut] = errorWord;
+			if (x < bounds.left) bounds.left = x;
+			if (x > bounds.right) bounds.right = x;
+			if (y < bounds.top) bounds.top = y;
+			if (y > bounds.bottom) bounds.bottom = y;
+			count += 1;
+		}
+	}
+
+	return { count, stopped: false };
+}
+
+function compareFastBytes(data1, data2, width1, width2, overlapWidth, overlapHeight, unionWidth, target, tolerance, errorColor, bounds) {
+	let count = 0;
+
+	for (let y = 0; y < overlapHeight; y++) {
+		for (let x = 0; x < overlapWidth; x++) {
+			const i1 = (y * width1 + x) << 2;
+			const i2 = (y * width2 + x) << 2;
+			const offset = (y * unionWidth + x) << 2;
+			if (!rgbaDiffers(data1, i1, data2, i2, tolerance)) {
+				copyOpaque(target, offset, data1, i1);
+				continue;
+			}
+			writeFlat(target, offset, errorColor);
+			expand(bounds, x, y);
+			count += 1;
+		}
+	}
+
+	return { count, stopped: false };
+}
+
+function rgbaDiffers(data1, i1, data2, i2, tolerance) {
+	const r1 = data1[i1];
+	const g1 = data1[i1 + 1];
+	const b1 = data1[i1 + 2];
+	const a1 = data1[i1 + 3];
+	const r2 = data2[i2];
+	const g2 = data2[i2 + 1];
+	const b2 = data2[i2 + 2];
+	const a2 = data2[i2 + 3];
+
+	if (a1 === 0 && a2 === 0) {
+		return false;
+	}
+	if (a1 === 255 && a2 === 255) {
+		const dr = r1 - r2;
+		const dg = g1 - g2;
+		const db = b1 - b2;
+		if ((dr * dr + dg * dg + db * db) * MIN_YIQ_PER_MAG > tolerance) {
+			return true;
+		}
+	}
+	return yiqDistance(r1, g1, b1, a1, r2, g2, b2, a2) > tolerance;
+}
+
+function colorWord(color) {
+	const bytes = new Uint8Array(4);
+	bytes[0] = color.red & 255;
+	bytes[1] = color.green & 255;
+	bytes[2] = color.blue & 255;
+	bytes[3] = color.alpha & 255;
+	return new Uint32Array(bytes.buffer)[0];
+}
+
+function compareGeneral(img1, img2, overlapWidth, overlapHeight, unionWidth, target, settings, options, maskInfo, bounds, counted, nonOverlap) {
+	const data1 = img1.data;
+	const data2 = img2.data;
+	const width1 = img1.width;
+	const width2 = img2.width;
+	const mask = maskInfo ? maskInfo.mask : null;
+	let count = 0;
+	let stopped = false;
+
+	for (let y = 0; y < overlapHeight && !stopped; y++) {
+		for (let x = 0; x < overlapWidth; x++) {
+			const i1 = (y * width1 + x) * 4;
+			const i2 = (y * width2 + x) * 4;
+			const offset = (y * unionWidth + x) * 4;
+			const r1 = data1[i1];
+			const g1 = data1[i1 + 1];
+			const b1 = data1[i1 + 2];
+			const a1 = data1[i1 + 3];
+			const r2 = data2[i2];
+			const g2 = data2[i2 + 1];
+			const b2 = data2[i2 + 2];
+			const a2 = data2[i2 + 3];
+
+			if (mask && mask[y * overlapWidth + x]) {
+				writeGray(target, offset, r2, g2, b2, a2, settings.transparency);
+				continue;
+			}
+
+			if (!pixelsDiffer(r1, g1, b1, a1, r2, g2, b2, a2, options.tolerance, options.ignoreColors)) {
+				if (options.ignoreColors) {
+					writeGray(target, offset, r2, g2, b2, a2, settings.transparency);
+				} else {
+					writeCopy(target, offset, r1, g1, b1, a1, settings.transparency);
+				}
+				continue;
+			}
+
+			if (options.ignoreAntialiasing && lumaWithinTolerance(r1, g1, b1, a1, r2, g2, b2, a2, options.tolerance)) {
+				const onEdge = isAntialiased(data1, width1, data2, width2, x, y, overlapWidth, overlapHeight) ||
+					isAntialiased(data2, width2, data1, width1, x, y, overlapWidth, overlapHeight);
+				if (onEdge) {
+					writeGray(target, offset, r2, g2, b2, a2, settings.transparency);
+					continue;
+				}
+			}
+
+			writeMismatch(target, offset, settings, r2, g2, b2, a2);
+			expand(bounds, x, y);
+			count += 1;
+			if (options.earlyThreshold != null && counted > 0 && ((count + nonOverlap) / counted) * 100 > options.earlyThreshold) {
+				stopped = true;
+				break;
+			}
+		}
+	}
+
+	return { count, stopped };
+}
+
+function pixelsDiffer(r1, g1, b1, a1, r2, g2, b2, a2, tolerance, colorsOnly) {
+	if (a1 === 0 && a2 === 0) {
+		return false;
+	}
+	if (r1 === r2 && g1 === g2 && b1 === b2 && a1 === a2) {
+		return false;
+	}
+
+	if (!colorsOnly && a1 === 255 && a2 === 255) {
+		const dr = r1 - r2;
+		const dg = g1 - g2;
+		const db = b1 - b2;
+		if ((dr * dr + dg * dg + db * db) * MIN_YIQ_PER_MAG > tolerance) {
+			return true;
+		}
+	}
+
+	const distance = colorsOnly
+		? lumaDistance(r1, g1, b1, a1, r2, g2, b2, a2)
+		: yiqDistance(r1, g1, b1, a1, r2, g2, b2, a2);
+	return distance > tolerance;
+}
+
+function lumaWithinTolerance(r1, g1, b1, a1, r2, g2, b2, a2, tolerance) {
+	return lumaDistance(r1, g1, b1, a1, r2, g2, b2, a2) <= tolerance;
+}
+
+function yiqDistance(r1, g1, b1, a1, r2, g2, b2, a2) {
+	const left = blendedRgb(r1, g1, b1, a1);
+	const right = blendedRgb(r2, g2, b2, a2);
+	const dr = left.r - right.r;
+	const dg = left.g - right.g;
+	const db = left.b - right.b;
+	const y = 0.29889531 * dr + 0.58662247 * dg + 0.11448223 * db;
+	const i = 0.59597799 * dr - 0.2741761 * dg - 0.32180189 * db;
+	const q = 0.21147017 * dr - 0.52261711 * dg + 0.31114694 * db;
+	return 0.5053 * y * y + 0.299 * i * i + 0.1957 * q * q;
+}
+
+function lumaDistance(r1, g1, b1, a1, r2, g2, b2, a2) {
+	const y = lumaDelta(r1, g1, b1, a1, r2, g2, b2, a2);
+	return 0.5053 * y * y;
+}
+
+function lumaDelta(r1, g1, b1, a1, r2, g2, b2, a2) {
+	const left = blendedRgb(r1, g1, b1, a1);
+	const right = blendedRgb(r2, g2, b2, a2);
+	return 0.29889531 * (left.r - right.r) +
+		0.58662247 * (left.g - right.g) +
+		0.11448223 * (left.b - right.b);
+}
+
+function blendedRgb(r, g, b, a) {
+	if (a < 255) {
+		const alpha = a / 255;
+		r = 255 + (r - 255) * alpha;
+		g = 255 + (g - 255) * alpha;
+		b = 255 + (b - 255) * alpha;
+	}
+	return { r, g, b };
+}
+
+function isAntialiased(data, stride, other, otherStride, x, y, overlapWidth, overlapHeight) {
+	const x0 = Math.max(x - 1, 0);
+	const y0 = Math.max(y - 1, 0);
+	const x2 = Math.min(x + 1, overlapWidth - 1);
+	const y2 = Math.min(y + 1, overlapHeight - 1);
+	const pos = (y * stride + x) * 4;
+	let zeroes = (x === x0 || x === x2 || y === y0 || y === y2) ? 1 : 0;
+	let min = 0;
+	let max = 0;
+	let minX = 0;
+	let minY = 0;
+	let maxX = 0;
+	let maxY = 0;
+	const r = data[pos];
+	const g = data[pos + 1];
+	const b = data[pos + 2];
+	const a = data[pos + 3];
+
+	for (let nx = x0; nx <= x2; nx++) {
+		for (let ny = y0; ny <= y2; ny++) {
+			if (nx === x && ny === y) {
+				continue;
+			}
+			const next = (ny * stride + nx) * 4;
+			const delta = lumaDelta(r, g, b, a, data[next], data[next + 1], data[next + 2], data[next + 3]);
+			if (delta === 0) {
+				zeroes += 1;
+				if (zeroes > 2) {
+					return false;
+				}
+			} else if (delta < min) {
+				min = delta;
+				minX = nx;
+				minY = ny;
+			} else if (delta > max) {
+				max = delta;
+				maxX = nx;
+				maxY = ny;
+			}
+		}
+	}
+
+	if (min === 0 || max === 0) {
+		return false;
+	}
+
+	const darkestIsSolid = hasManySiblings(data, stride, minX, minY, overlapWidth, overlapHeight) &&
+		hasManySiblings(other, otherStride, minX, minY, overlapWidth, overlapHeight);
+	const brightestIsSolid = hasManySiblings(data, stride, maxX, maxY, overlapWidth, overlapHeight) &&
+		hasManySiblings(other, otherStride, maxX, maxY, overlapWidth, overlapHeight);
+	return darkestIsSolid || brightestIsSolid;
+}
+
+function hasManySiblings(data, stride, x, y, limitWidth, limitHeight) {
+	const x0 = Math.max(x - 1, 0);
+	const y0 = Math.max(y - 1, 0);
+	const x2 = Math.min(x + 1, limitWidth - 1);
+	const y2 = Math.min(y + 1, limitHeight - 1);
+	const pos = (y * stride + x) * 4;
+	let zeroes = (x === x0 || x === x2 || y === y0 || y === y2) ? 1 : 0;
+	const r = data[pos];
+	const g = data[pos + 1];
+	const b = data[pos + 2];
+	const a = data[pos + 3];
+
+	for (let nx = x0; nx <= x2; nx++) {
+		for (let ny = y0; ny <= y2; ny++) {
+			if (nx === x && ny === y) {
+				continue;
+			}
+			const next = (ny * stride + nx) * 4;
+			if (data[next] === r && data[next + 1] === g && data[next + 2] === b && data[next + 3] === a) {
+				zeroes += 1;
+				if (zeroes > 2) {
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+function buildMask(rectangles, overlapWidth, overlapHeight) {
+	if (!Array.isArray(rectangles) || rectangles.length === 0 || overlapWidth === 0 || overlapHeight === 0) {
+		return null;
+	}
+
+	const mask = Buffer.alloc(overlapWidth * overlapHeight);
+	let masked = 0;
+
+	for (let i = 0; i < rectangles.length; i++) {
+		const rect = rectangles[i];
+		if (!rect || rect.length < 4) {
+			continue;
+		}
+		const rx = rect[0] | 0;
+		const ry = rect[1] | 0;
+		const rw = rect[2] | 0;
+		const rh = rect[3] | 0;
+		if (rw <= 0 || rh <= 0) {
+			continue;
+		}
+		const x0 = Math.max(0, rx);
+		const y0 = Math.max(0, ry);
+		const x1 = Math.min(overlapWidth, rx + rw);
+		const y1 = Math.min(overlapHeight, ry + rh);
+		for (let y = y0; y < y1; y++) {
+			const row = y * overlapWidth;
+			for (let x = x0; x < x1; x++) {
+				if (mask[row + x] === 0) {
+					mask[row + x] = 1;
+					masked += 1;
+				}
+			}
+		}
+	}
+
+	if (masked === 0) {
+		return null;
+	}
+
+	return { mask, masked };
+}
+
+function paintMissing(target, unionWidth, unionHeight, overlapWidth, overlapHeight, color, bounds) {
+	let count = 0;
+	for (let y = 0; y < overlapHeight; y++) {
+		for (let x = overlapWidth; x < unionWidth; x++) {
+			writeFlat(target, (y * unionWidth + x) * 4, color);
+			expand(bounds, x, y);
+			count += 1;
+		}
+	}
+	for (let y = overlapHeight; y < unionHeight; y++) {
+		for (let x = 0; x < unionWidth; x++) {
+			writeFlat(target, (y * unionWidth + x) * 4, color);
+			expand(bounds, x, y);
+			count += 1;
+		}
+	}
+	return count;
+}
+
+function expand(bounds, x, y) {
+	if (y < bounds.top) bounds.top = y;
+	if (y > bounds.bottom) bounds.bottom = y;
+	if (x < bounds.left) bounds.left = x;
+	if (x > bounds.right) bounds.right = x;
+}
+
+function sameBytes(left, right) {
+	return left && right && left.length === right.length && Buffer.compare(left, right) === 0;
+}
+
+function uint32View(data) {
+	if (!data || (data.byteOffset % 4) !== 0 || (data.byteLength % 4) !== 0) {
+		return null;
+	}
+	return new Uint32Array(data.buffer, data.byteOffset, data.byteLength >>> 2);
+}
+
+function copyOpaque(target, offset, source, sourceOffset) {
+	target[offset] = source[sourceOffset];
+	target[offset + 1] = source[sourceOffset + 1];
+	target[offset + 2] = source[sourceOffset + 2];
+	target[offset + 3] = source[sourceOffset + 3];
+}
+
+function writeCopy(target, offset, r, g, b, a, transparency) {
+	target[offset] = r;
+	target[offset + 1] = g;
+	target[offset + 2] = b;
+	target[offset + 3] = transparency === 1 ? a : Math.round(a * transparency);
+}
+
+function writeGray(target, offset, r, g, b, a, transparency) {
+	const bright = Math.round(0.29889531 * r + 0.58662247 * g + 0.11448223 * b);
+	target[offset] = bright;
+	target[offset + 1] = bright;
+	target[offset + 2] = bright;
+	target[offset + 3] = Math.round(a * transparency);
+}
+
+function writeFlat(target, offset, color) {
+	target[offset] = color.red | 0;
+	target[offset + 1] = color.green | 0;
+	target[offset + 2] = color.blue | 0;
+	target[offset + 3] = color.alpha | 0;
+}
+
+function writeMismatch(target, offset, settings, r2, g2, b2, a2) {
+	if (settings.errorType === 'movement') {
+		const color = settings.errorColor;
+		target[offset] = Math.round(((r2 * (color.red / 255)) + color.red) / 2);
+		target[offset + 1] = Math.round(((g2 * (color.green / 255)) + color.green) / 2);
+		target[offset + 2] = Math.round(((b2 * (color.blue / 255)) + color.blue) / 2);
+		target[offset + 3] = a2 | 0;
+		return;
+	}
+	writeFlat(target, offset, settings.errorColor);
+}
+
+module.exports = resemble;

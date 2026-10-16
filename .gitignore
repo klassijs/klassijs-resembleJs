@@ -3,3 +3,7 @@
 
 # NPM Packages
 /node_modules
+
+.DS_Store
+TODO.md
+
